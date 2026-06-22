@@ -561,6 +561,7 @@ class Overlay:
         self.bg_transparent = bool(cfg.get("bg_transparent", False))
         self.qr_url      = cfg.get("qr_url", "")
         self.qr_side     = cfg.get("qr_side", "right")  # "left" or "right"
+        self.qr_visible  = bool(cfg.get("qr_visible", True))
         self._geometry   = cfg.get("geometry", "800x160+60+60")
         self._drag_x = self._drag_y = 0
         self._rsz_x = self._rsz_y = self._rsz_w = self._rsz_h = 0
@@ -715,7 +716,7 @@ class Overlay:
 
     def _qr_area(self, win_h):
         """QR 表示領域の幅。win_h と同じ正方形 + パディング。"""
-        if not self.qr_url or not HAS_QR:
+        if not self.qr_url or not HAS_QR or not self.qr_visible:
             return 0
         # QR は高さ - PAD_Y*2 の正方形、左右にも余白
         return max(1, win_h - 2 * PAD_Y) + PAD_X
@@ -765,7 +766,7 @@ class Overlay:
             self.canvas.delete(self._qr_id)
             self._qr_id = None
         self._qr_image = None  # ImageTk の参照保持用
-        if not self.qr_url or not HAS_QR:
+        if not self.qr_url or not HAS_QR or not self.qr_visible:
             return
         ch = self.canvas.winfo_height()
         cw = self.canvas.winfo_width()
@@ -808,6 +809,7 @@ class Overlay:
             w.bind('<B1-Motion>',       self._drag_move)
             w.bind('<ButtonRelease-1>', lambda e: self._save_state())
             w.bind('<Double-Button-1>', lambda e: self._start_inline_edit())
+            w.bind('<Motion>',          self._update_cursor)
             for ev in rclick_events:
                 w.bind(ev, self._show_menu)
         # grip のイベントは root に伝播させない（ドラッグと競合するため）
@@ -826,6 +828,39 @@ class Overlay:
         if e.widget is self.root and not getattr(self, '_rsz_active', False):
             self._refit(e.width, e.height)
 
+    def _update_cursor(self, e):
+        if getattr(self, '_mode', None) == 'resize':
+            return
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        rx = e.x_root - self.root.winfo_x()
+        ry = e.y_root - self.root.winfo_y()
+        edges = self._hit_edges(rx, ry, rw, rh)
+        # macOS Tk は size_* 系を受け付けないので crosshair で代替
+        if IS_MAC:
+            cursor = "crosshair" if edges else ""
+        else:
+            cmap = {
+                "n": "size_ns", "s": "size_ns",
+                "e": "size_we", "w": "size_we",
+                "ne": "size_ne_sw", "sw": "size_ne_sw",
+                "nw": "size_nw_se", "se": "size_nw_se",
+            }
+            cursor = cmap.get(edges, "")
+        try:
+            e.widget.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
+    def _hit_edges(self, rx, ry, rw, rh, hot=12):
+        """ポインタ位置からどの辺/角に当たっているか返す ('n','s','e','w' の組合せ)。"""
+        edges = ""
+        if ry < hot:                edges += "n"
+        elif ry >= rh - hot:        edges += "s"
+        if rx < hot:                edges += "w"
+        elif rx >= rw - hot:        edges += "e"
+        return edges
+
     def _drag_start(self, e):
         m = getattr(self, '_active_menu', None)
         if m is not None:
@@ -833,14 +868,14 @@ class Overlay:
                 m.destroy()
             except tk.TclError:
                 pass
-        # 右下角の grip ホットスポットならリサイズ開始
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
-        hot = 24
         rx = e.x_root - self.root.winfo_x()
         ry = e.y_root - self.root.winfo_y()
-        if rx >= rw - hot and ry >= rh - hot:
+        edges = self._hit_edges(rx, ry, rw, rh)
+        if edges:
             self._mode = 'resize'
+            self._rsz_edges = edges
             self._rsz_start(e)
             return
         self._mode = 'drag'
@@ -864,10 +899,26 @@ class Overlay:
         return 'break'
 
     def _rsz_move(self, e):
-        w = max(self.MIN_W, self._rsz_w + (e.x_root - self._rsz_x))
-        h = max(self.MIN_H, self._rsz_h + (e.y_root - self._rsz_y))
-        # 位置も明示しないと OS によってウィンドウが流される
-        self.root.geometry(f"{w}x{h}+{self._rsz_origin_x}+{self._rsz_origin_y}")
+        edges = getattr(self, '_rsz_edges', 'se')
+        dx = e.x_root - self._rsz_x
+        dy = e.y_root - self._rsz_y
+        x = self._rsz_origin_x
+        y = self._rsz_origin_y
+        w = self._rsz_w
+        h = self._rsz_h
+        if 'e' in edges:
+            w = max(self.MIN_W, self._rsz_w + dx)
+        if 'w' in edges:
+            new_w = max(self.MIN_W, self._rsz_w - dx)
+            x = self._rsz_origin_x + (self._rsz_w - new_w)
+            w = new_w
+        if 's' in edges:
+            h = max(self.MIN_H, self._rsz_h + dy)
+        if 'n' in edges:
+            new_h = max(self.MIN_H, self._rsz_h - dy)
+            y = self._rsz_origin_y + (self._rsz_h - new_h)
+            h = new_h
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
         self._refit(w, h)
         return 'break'
 
@@ -894,7 +945,8 @@ class Overlay:
             qr_label = "QRを編集..." if self.qr_url else "QRを設定..."
             m.add_command(label=qr_label, command=self.change_qr)
             if self.qr_url:
-                m.add_command(label="QRを削除", command=self.clear_qr)
+                vis_label = "QRを非表示" if self.qr_visible else "QRを表示"
+                m.add_command(label=vis_label, command=self.toggle_qr_visible)
             m.add_separator()
             m.add_command(label="終了",         command=self._on_quit)
             self._native_menu = m
@@ -994,6 +1046,7 @@ class Overlay:
             "geometry":    self.root.geometry(),
             "qr_url":      self.qr_url,
             "qr_side":     self.qr_side,
+            "qr_visible":  self.qr_visible,
         })
 
     def toggle_bold(self):
@@ -1078,6 +1131,11 @@ class Overlay:
 
     def clear_qr(self):
         self.qr_url = ""
+        self._refit()
+        self._save_state()
+
+    def toggle_qr_visible(self):
+        self.qr_visible = not self.qr_visible
         self._refit()
         self._save_state()
 
