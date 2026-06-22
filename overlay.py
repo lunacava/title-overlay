@@ -15,6 +15,14 @@ import sys
 import platform
 import json
 import os
+import io
+
+try:
+    import qrcode
+    from PIL import Image, ImageTk
+    HAS_QR = True
+except ImportError:
+    HAS_QR = False
 
 PAD_X = 24
 PAD_Y = 4
@@ -444,6 +452,89 @@ class FontPickerDialog(tk.Toplevel):
             self._on_preview(self._original)
 
 
+# ── QR 設定ダイアログ ──────────────────────────────────────────────────
+class QRSettingsDialog(tk.Toplevel):
+    def __init__(self, parent, current_url, current_side, on_ok):
+        super().__init__(parent)
+        _make_borderless(self)
+        self.attributes('-topmost', True)
+        self.resizable(False, False)
+        self.configure(bg=C["border"])
+
+        outer = tk.Frame(self, bg=C["border"], padx=1, pady=1)
+        outer.pack()
+        body = tk.Frame(outer, bg=C["bg"], padx=20, pady=16)
+        body.pack()
+
+        tk.Label(body, text="QR コード設定",
+                 font=(FONT_TEXT_FAMILY, 10, "bold"),
+                 fg=C["text"], bg=C["bg"]).pack(anchor="w")
+        tk.Frame(body, bg=C["accent"], height=1).pack(fill=tk.X, pady=(4, 12))
+
+        tk.Label(body, text="URL", font=(FONT_TEXT_FAMILY, 9),
+                 fg=C["text_dim"], bg=C["bg"]).pack(anchor="w")
+        url_var = tk.StringVar(value=current_url)
+        entry = tk.Entry(body, textvariable=url_var, width=40,
+                         bg="#1A1A1A", fg=C["text"],
+                         insertbackground=C["text"],
+                         relief=tk.FLAT, bd=0,
+                         highlightthickness=1,
+                         highlightcolor=C["accent"],
+                         highlightbackground="#444444",
+                         font=(FONT_TEXT_FAMILY, 11))
+        entry.pack(pady=(4, 12), ipady=6)
+        entry.focus_set()
+
+        tk.Label(body, text="表示位置", font=(FONT_TEXT_FAMILY, 9),
+                 fg=C["text_dim"], bg=C["bg"]).pack(anchor="w")
+
+        side_var = tk.StringVar(value=current_side)
+        sides = tk.Frame(body, bg=C["bg"])
+        sides.pack(anchor="w", pady=(4, 12))
+
+        def _radio(text, value):
+            r = tk.Radiobutton(
+                sides, text=text, variable=side_var, value=value,
+                bg=C["bg"], fg=C["text"],
+                selectcolor=C["bg"], activebackground=C["bg"],
+                activeforeground=C["accent"],
+                font=(FONT_TEXT_FAMILY, 10), bd=0, highlightthickness=0,
+            )
+            r.pack(side=tk.LEFT, padx=(0, 16))
+
+        _radio("左側", "left")
+        _radio("右側", "right")
+
+        bf = tk.Frame(body, bg=C["bg"])
+        bf.pack()
+
+        def _btn(text, cmd, accent=False):
+            bg = C["accent"] if accent else "#1C1C2A"
+            b = tk.Label(bf, text=text, font=(FONT_TEXT_FAMILY, 9, "bold"),
+                         fg="#FFFFFF", bg=bg, padx=16, pady=6, cursor="hand2")
+            b.pack(side=tk.LEFT, padx=5)
+            b.bind('<Enter>', lambda e: b.config(bg="#9A8EE0" if accent else "#2A2A3A"))
+            b.bind('<Leave>', lambda e: b.config(bg=bg))
+            b.bind('<Button-1>', lambda e: cmd())
+
+        def _ok():
+            on_ok(url_var.get().strip(), side_var.get())
+            self.destroy()
+
+        _btn("  OK  ", _ok, accent=True)
+        _btn("キャンセル", self.destroy)
+
+        self.bind('<Return>', lambda e: _ok())
+        self.bind('<Escape>', lambda e: self.destroy())
+        self.update_idletasks()
+        w  = self.winfo_reqwidth()
+        h  = self.winfo_reqheight()
+        px = parent.winfo_rootx() + parent.winfo_width()  // 2
+        py = parent.winfo_rooty() + parent.winfo_height() // 2
+        self.geometry(f"{w}x{h}+{max(0, px - w//2)}+{max(0, py - h//2)}")
+        self.grab_set()
+
+
 # ── メインオーバーレイ ──────────────────────────────────────────────────
 class Overlay:
     MIN_W, MIN_H = 80, 40
@@ -468,6 +559,8 @@ class Overlay:
         self.bg_color    = cfg.get("bg_color", "#1A1A1A")
         self.alpha       = float(cfg.get("alpha", 0.92))
         self.bg_transparent = bool(cfg.get("bg_transparent", False))
+        self.qr_url      = cfg.get("qr_url", "")
+        self.qr_side     = cfg.get("qr_side", "right")  # "left" or "right"
         self._geometry   = cfg.get("geometry", "800x160+60+60")
         self._drag_x = self._drag_y = 0
         self._rsz_x = self._rsz_y = self._rsz_w = self._rsz_h = 0
@@ -544,9 +637,11 @@ class Overlay:
 
         # macOS の Tk は "size_nw_se" を受け付けない（TclError）
         resize_cursor = "crosshair" if IS_MAC else "size_nw_se"
+        # grip は透明（テキスト色を背景と同じにして見えなくする）。
+        # 当たり判定だけ残してドラッグでリサイズできるようにする。
         self.grip = tk.Label(
             r, text="◢", font=("Arial", 11),
-            fg="#333333", bg=self.bg_color,
+            fg=self.bg_color, bg=self.bg_color,
             cursor=resize_cursor, padx=3, pady=1,
         )
         self.grip.place(relx=1.0, rely=1.0, anchor="se")
@@ -592,7 +687,8 @@ class Overlay:
         self.frame.configure(bg=bg)
         self.canvas.configure(bg=bg)
         self.canvas.itemconfigure(self._text_id, fill=self.text_color)
-        self.grip.configure(bg=bg)
+        # grip は背景に紛れさせる（クリック判定だけ残す）
+        self.grip.configure(bg=bg, fg=bg)
 
     # ── font fitting ───────────────────────────────────────────────────
     def _rebuild_cache(self):
@@ -617,8 +713,15 @@ class Overlay:
             self._ref_h = 1
             self._ref_w = 1
 
+    def _qr_area(self, win_h):
+        """QR 表示領域の幅。win_h と同じ正方形 + パディング。"""
+        if not self.qr_url or not HAS_QR:
+            return 0
+        # QR は高さ - PAD_Y*2 の正方形、左右にも余白
+        return max(1, win_h - 2 * PAD_Y) + PAD_X
+
     def _compute_font_size(self, win_w, win_h):
-        avail_w = max(1, win_w - 2 * PAD_X)
+        avail_w = max(1, win_w - 2 * PAD_X - self._qr_area(win_h))
         avail_h = max(1, win_h - 2 * PAD_Y)
         scale_h = avail_h / self._ref_h
         scale_w = avail_w / self._ref_w
@@ -631,13 +734,18 @@ class Overlay:
         size = self._compute_font_size(w, h)
         self.canvas.itemconfigure(self._text_id, font=self._font(size))
         self._redraw_text()
+        self._redraw_qr()
 
     def _redraw_text(self):
-        """Canvas 内のテキストを bbox の中心に合わせて配置する。"""
+        """Canvas 内のテキストをテキスト領域の中心に置く。QR がある側を避ける。"""
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         if cw <= 1 or ch <= 1:
             return
+        qr_area = self._qr_area(ch)
+        text_left = qr_area if (qr_area and self.qr_side == "left") else 0
+        text_right = cw - qr_area if (qr_area and self.qr_side == "right") else cw
+        text_w = max(1, text_right - text_left)
         # 一旦 (0,0) anchor=nw に置いて bbox を測り、そこから中心オフセットを計算
         self.canvas.coords(self._text_id, 0, 0)
         self.canvas.itemconfigure(self._text_id, anchor='nw')
@@ -646,8 +754,47 @@ class Overlay:
             return
         x1, y1, x2, y2 = bbox
         tw, th = x2 - x1, y2 - y1
-        # bbox は実描画範囲なので、中心に置けば視覚的にも中央
-        self.canvas.coords(self._text_id, (cw - tw) / 2 - x1, (ch - th) / 2 - y1)
+        cx = text_left + (text_w - tw) / 2 - x1
+        cy = (ch - th) / 2 - y1
+        self.canvas.coords(self._text_id, cx, cy)
+
+    def _redraw_qr(self):
+        """QR コードを Canvas 上に描画する。"""
+        # 既存の QR をクリア
+        if hasattr(self, '_qr_id') and self._qr_id is not None:
+            self.canvas.delete(self._qr_id)
+            self._qr_id = None
+        self._qr_image = None  # ImageTk の参照保持用
+        if not self.qr_url or not HAS_QR:
+            return
+        ch = self.canvas.winfo_height()
+        cw = self.canvas.winfo_width()
+        if cw <= 1 or ch <= 1:
+            return
+        size = max(1, ch - 2 * PAD_Y)
+        try:
+            qr = qrcode.QRCode(border=1, box_size=10)
+            qr.add_data(self.qr_url)
+            qr.make(fit=True)
+            # スキャン精度のため黒/白で固定
+            img = qr.make_image(fill_color="black",
+                                back_color="white").convert("RGB")
+            img = img.resize((size, size), Image.NEAREST)
+            self._qr_image = ImageTk.PhotoImage(img)
+        except Exception:
+            return
+        if self.qr_side == "left":
+            x = PAD_X // 2
+        else:
+            x = cw - size - PAD_X // 2
+        y = (ch - size) // 2
+        self._qr_id = self.canvas.create_image(x, y, image=self._qr_image,
+                                                anchor='nw')
+        # grip を Canvas より下に沈めて QR を見せる
+        try:
+            self.grip.lower(self.canvas)
+        except tk.TclError:
+            pass
 
     # ── bindings ───────────────────────────────────────────────────────
     def _bind(self):
@@ -686,10 +833,24 @@ class Overlay:
                 m.destroy()
             except tk.TclError:
                 pass
+        # 右下角の grip ホットスポットならリサイズ開始
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        hot = 24
+        rx = e.x_root - self.root.winfo_x()
+        ry = e.y_root - self.root.winfo_y()
+        if rx >= rw - hot and ry >= rh - hot:
+            self._mode = 'resize'
+            self._rsz_start(e)
+            return
+        self._mode = 'drag'
         self._drag_x = e.x_root - self.root.winfo_x()
         self._drag_y = e.y_root - self.root.winfo_y()
 
     def _drag_move(self, e):
+        if getattr(self, '_mode', 'drag') == 'resize':
+            self._rsz_move(e)
+            return
         self.root.geometry(f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}")
 
     def _rsz_start(self, e):
@@ -729,6 +890,11 @@ class Overlay:
             m.add_command(label="文字色を変更", command=self.change_text_color)
             m.add_command(label="背景色を変更", command=self.change_bg_color)
             m.add_command(label="透明度を変更", command=self.change_alpha)
+            m.add_separator()
+            qr_label = "QRを編集..." if self.qr_url else "QRを設定..."
+            m.add_command(label=qr_label, command=self.change_qr)
+            if self.qr_url:
+                m.add_command(label="QRを削除", command=self.clear_qr)
             m.add_separator()
             m.add_command(label="終了",         command=self._on_quit)
             self._native_menu = m
@@ -826,6 +992,8 @@ class Overlay:
             "bg_color":    self.bg_color,
             "alpha":       self.alpha,
             "geometry":    self.root.geometry(),
+            "qr_url":      self.qr_url,
+            "qr_side":     self.qr_side,
         })
 
     def toggle_bold(self):
@@ -895,6 +1063,23 @@ class Overlay:
         d = DarkSliderDialog(self.root, "透明度", int(self.alpha * 100),
                              10, 100, "%", on_ok)
         d.bind('<Destroy>', lambda e: self._restore_topmost())
+
+    def change_qr(self):
+        if not HAS_QR:
+            return
+        def on_ok(url, side):
+            self.qr_url = url
+            self.qr_side = side
+            self._refit()
+            self._save_state()
+        self._yield_topmost()
+        d = QRSettingsDialog(self.root, self.qr_url, self.qr_side, on_ok)
+        d.bind('<Destroy>', lambda e: self._restore_topmost())
+
+    def clear_qr(self):
+        self.qr_url = ""
+        self._refit()
+        self._save_state()
 
 
 if __name__ == "__main__":

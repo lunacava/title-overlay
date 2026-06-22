@@ -32,6 +32,8 @@ sudo dnf install python3-tkinter
 
 ## ビルド（PyInstaller）
 
+### macOS / Linux
+
 ```bash
 ./build.sh
 ```
@@ -41,6 +43,19 @@ sudo dnf install python3-tkinter
   - 配布時に Gatekeeper で弾かれたら `xattr -cr dist/overlay.app`
 - Linux: `dist/overlay`
   - `-topmost` が効かない WM では `wmctrl -r overlay -b add,above` で代替
+
+### Windows
+
+事前に Python 3.10 以降をインストール。
+
+```cmd
+build.bat
+```
+
+- 出力: `dist\overlay.exe`
+- 必要なライブラリ (`pyinstaller`, `qrcode`, `Pillow`) は `build.bat` が自動インストール
+
+アイコンを変えたい場合は先に `python make_icon.py "🚩"` で `icon.ico` を生成してから `build.bat`。
 
 ## 状態の永続化
 
