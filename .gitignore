@@ -3,3 +3,7 @@ __pycache__/
 build/
 dist/
 .DS_Store
+
+# Windows ビルド成果物
+!dist/
+!dist/overlay.exe

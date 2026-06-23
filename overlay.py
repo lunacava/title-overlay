@@ -952,6 +952,8 @@ class Overlay:
             self._native_menu = m
             m.tk_popup(e.x_root, e.y_root)
             return
+        qr_label = "QRを編集..." if self.qr_url else "QRを設定..."
+        vis_label = "QRを非表示" if self.qr_visible else "QRを表示"
         items = [
             (" T", "テキストを編集",    self._start_inline_edit),
             (" F", "フォントを変更",    self.change_font),
@@ -960,6 +962,9 @@ class Overlay:
             (" A", "文字色を変更",      self.change_text_color),
             ("[]", "背景色を変更",      self.change_bg_color),
             (" %", "透明度を変更",      self.change_alpha),
+            None,
+            (" Q", qr_label,            self.change_qr),
+        ] + ([(">|", vis_label, self.toggle_qr_visible)] if self.qr_url else []) + [
             None,
             (" x", "終了",              self._on_quit),
         ]
